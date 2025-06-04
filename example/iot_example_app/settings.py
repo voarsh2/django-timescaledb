@@ -13,8 +13,13 @@ https://docs.djangoproject.com/en/3.1/ref/settings/
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import sys
+import sys
 
 load_dotenv()
+
+# Add parent directory to Python path so we can import timescale during development
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
