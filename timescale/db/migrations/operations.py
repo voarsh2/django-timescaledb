@@ -49,37 +49,48 @@ class ApplyTimescalePolicies(Operation):
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         """
         Apply the TimescaleDB policies to the database.
+
+        For policy updates, we need to remove existing policies first,
+        then add the new ones to ensure the changes take effect.
         """
         # Get the actual model class, not the migration state model
         from django.apps import apps
         model = apps.get_model(app_label, self.model_name)
 
-        # Apply compression settings
+        # For policy updates, remove existing policies first
+        # This ensures that policy changes actually take effect
+        if self.compression_policy:
+            model.timescale.remove_compression_policy(if_exists=True)
+
+        if self.retention_policy:
+            model.timescale.remove_retention_policy(if_exists=True)
+
+        # Apply compression settings (only if not already enabled)
         if self.compression_settings and self.compression_settings.get('enabled', False):
             model.timescale.enable_compression(
                 compress_orderby=self.compression_settings.get('compress_orderby', []),
                 compress_segmentby=self.compression_settings.get('compress_segmentby', []),
                 compress_chunk_time_interval=self.compression_settings.get('compress_chunk_time_interval'),
-                if_not_exists=True
+                if_not_exists=True  # Compression can only be enabled once
             )
 
-        # Apply compression policy
+        # Apply compression policy (after removing old one)
         if self.compression_policy:
             model.timescale.add_compression_policy(
                 compress_after=self.compression_policy['compress_after'],
                 schedule_interval=self.compression_policy.get('schedule_interval'),
-                if_not_exists=True,
+                if_not_exists=False,  # We already removed the old policy
                 compress_created_before=self.compression_policy.get('compress_created_before'),
                 initial_start=self.compression_policy.get('initial_start'),
                 timezone=self.compression_policy.get('timezone')
             )
 
-        # Apply retention policy
+        # Apply retention policy (after removing old one)
         if self.retention_policy:
             model.timescale.add_retention_policy(
                 drop_after=self.retention_policy['drop_after'],
                 schedule_interval=self.retention_policy.get('schedule_interval'),
-                if_not_exists=True,
+                if_not_exists=False,  # We already removed the old policy
                 drop_created_before=self.retention_policy.get('drop_created_before'),
                 initial_start=self.retention_policy.get('initial_start'),
                 timezone=self.retention_policy.get('timezone')
@@ -224,21 +235,324 @@ class RemoveTimescalePolicies(Operation):
         """
         return f"remove_timescale_policies_{self.model_name.lower()}"
 
+
+# Individual operations for backward compatibility and programmatic use
+class AddRetentionPolicy(Operation):
+    """
+    Add a retention policy to automatically remove old data from a TimescaleDB hypertable.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        drop_after: Union[str, timedelta],
+        schedule_interval: Optional[Union[str, timedelta]] = None,
+        if_not_exists: bool = True,
+        drop_created_before: Optional[Union[str, timedelta]] = None,
+        initial_start: Optional[str] = None,
+        timezone: Optional[str] = None,
+        **kwargs
+    ):
+        self.model_name = model_name
+        self.drop_after = drop_after
+        self.schedule_interval = schedule_interval
+        self.if_not_exists = if_not_exists
+        self.drop_created_before = drop_created_before
+        self.initial_start = initial_start
+        self.timezone = timezone
+        super().__init__(**kwargs)
+
+    def state_forwards(self, app_label, state):
+        """The AddRetentionPolicy operation doesn't alter the model state."""
+        pass
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        """Add the retention policy to the database."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+
+        model.timescale.add_retention_policy(
+            drop_after=self.drop_after,
+            schedule_interval=self.schedule_interval,
+            if_not_exists=self.if_not_exists,
+            drop_created_before=self.drop_created_before,
+            initial_start=self.initial_start,
+            timezone=self.timezone
+        )
+
+    def database_backwards(self, app_label, schema_editor, from_state, to_state):
+        """Remove the retention policy from the database."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+        model.timescale.remove_retention_policy(if_exists=True)
+
+    def describe(self):
+        return f"Add retention policy to {self.model_name} (drop after {self.drop_after})"
+
+    @property
+    def migration_name_fragment(self):
+        return f"add_retention_policy_{self.model_name.lower()}"
+
     def deconstruct(self):
-        """
-        Return a 3-tuple of class import path, positional args, and keyword args.
-        """
         kwargs = {
             'model_name': self.model_name,
+            'drop_after': self.drop_after,
         }
-
-        if self.remove_compression_policy:
-            kwargs['remove_compression_policy'] = self.remove_compression_policy
-        if self.remove_retention_policy:
-            kwargs['remove_retention_policy'] = self.remove_retention_policy
+        if self.schedule_interval is not None:
+            kwargs['schedule_interval'] = self.schedule_interval
+        if not self.if_not_exists:
+            kwargs['if_not_exists'] = self.if_not_exists
+        if self.drop_created_before is not None:
+            kwargs['drop_created_before'] = self.drop_created_before
+        if self.initial_start is not None:
+            kwargs['initial_start'] = self.initial_start
+        if self.timezone is not None:
+            kwargs['timezone'] = self.timezone
 
         return (
-            self.__class__.__qualname__,
+            self.__class__.__name__,
+            [],
+            kwargs
+        )
+
+
+class RemoveRetentionPolicy(Operation):
+    """
+    Remove a retention policy from a TimescaleDB hypertable.
+    """
+
+    def __init__(self, model_name: str, if_exists: bool = True, **kwargs):
+        self.model_name = model_name
+        self.if_exists = if_exists
+        super().__init__(**kwargs)
+
+    def state_forwards(self, app_label, state):
+        """The RemoveRetentionPolicy operation doesn't alter the model state."""
+        pass
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        """Remove the retention policy from the database."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+        model.timescale.remove_retention_policy(if_exists=self.if_exists)
+
+    def database_backwards(self, app_label, schema_editor, from_state, to_state):
+        """This operation is not reversible without the original policy parameters."""
+        raise NotImplementedError(
+            "RemoveRetentionPolicy is not reversible. "
+            "The original policy parameters would be needed to reverse this operation."
+        )
+
+    def describe(self):
+        return f"Remove retention policy from {self.model_name}"
+
+    @property
+    def migration_name_fragment(self):
+        return f"remove_retention_policy_{self.model_name.lower()}"
+
+    def deconstruct(self):
+        kwargs = {'model_name': self.model_name}
+        if not self.if_exists:
+            kwargs['if_exists'] = self.if_exists
+
+        return (
+            self.__class__.__name__,
+            [],
+            kwargs
+        )
+
+
+class EnableCompression(Operation):
+    """
+    Enable compression on a TimescaleDB hypertable.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        compress_orderby: Optional[List[str]] = None,
+        compress_segmentby: Optional[List[str]] = None,
+        compress_chunk_time_interval: Optional[Union[str, timedelta]] = None,
+        if_not_exists: bool = True,
+        **kwargs
+    ):
+        self.model_name = model_name
+        self.compress_orderby = compress_orderby or []
+        self.compress_segmentby = compress_segmentby or []
+        self.compress_chunk_time_interval = compress_chunk_time_interval
+        self.if_not_exists = if_not_exists
+        super().__init__(**kwargs)
+
+    def state_forwards(self, app_label, state):
+        """The EnableCompression operation doesn't alter the model state."""
+        pass
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        """Enable compression on the hypertable."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+
+        model.timescale.enable_compression(
+            compress_orderby=self.compress_orderby,
+            compress_segmentby=self.compress_segmentby,
+            compress_chunk_time_interval=self.compress_chunk_time_interval,
+            if_not_exists=self.if_not_exists
+        )
+
+    def database_backwards(self, app_label, schema_editor, from_state, to_state):
+        """
+        Note: TimescaleDB doesn't support disabling compression once enabled.
+        This is a limitation of TimescaleDB itself.
+        """
+        # We can't actually disable compression in TimescaleDB
+        # This is documented behavior
+        pass
+
+    def describe(self):
+        return f"Enable compression on {self.model_name}"
+
+    @property
+    def migration_name_fragment(self):
+        return f"enable_compression_{self.model_name.lower()}"
+
+    def deconstruct(self):
+        kwargs = {'model_name': self.model_name}
+        if self.compress_orderby:
+            kwargs['compress_orderby'] = self.compress_orderby
+        if self.compress_segmentby:
+            kwargs['compress_segmentby'] = self.compress_segmentby
+        if self.compress_chunk_time_interval is not None:
+            kwargs['compress_chunk_time_interval'] = self.compress_chunk_time_interval
+        if not self.if_not_exists:
+            kwargs['if_not_exists'] = self.if_not_exists
+
+        return (
+            self.__class__.__name__,
+            [],
+            kwargs
+        )
+
+
+class AddCompressionPolicy(Operation):
+    """
+    Add a compression policy to automatically compress chunks older than a specified interval.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        compress_after: Union[str, timedelta],
+        schedule_interval: Optional[Union[str, timedelta]] = None,
+        if_not_exists: bool = True,
+        compress_created_before: Optional[Union[str, timedelta]] = None,
+        initial_start: Optional[str] = None,
+        timezone: Optional[str] = None,
+        **kwargs
+    ):
+        self.model_name = model_name
+        self.compress_after = compress_after
+        self.schedule_interval = schedule_interval
+        self.if_not_exists = if_not_exists
+        self.compress_created_before = compress_created_before
+        self.initial_start = initial_start
+        self.timezone = timezone
+        super().__init__(**kwargs)
+
+    def state_forwards(self, app_label, state):
+        """The AddCompressionPolicy operation doesn't alter the model state."""
+        pass
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        """Add the compression policy to the database."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+
+        model.timescale.add_compression_policy(
+            compress_after=self.compress_after,
+            schedule_interval=self.schedule_interval,
+            if_not_exists=self.if_not_exists,
+            compress_created_before=self.compress_created_before,
+            initial_start=self.initial_start,
+            timezone=self.timezone
+        )
+
+    def database_backwards(self, app_label, schema_editor, from_state, to_state):
+        """Remove the compression policy from the database."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+        model.timescale.remove_compression_policy(if_exists=True)
+
+    def describe(self):
+        return f"Add compression policy to {self.model_name} (compress after {self.compress_after})"
+
+    @property
+    def migration_name_fragment(self):
+        return f"add_compression_policy_{self.model_name.lower()}"
+
+    def deconstruct(self):
+        kwargs = {
+            'model_name': self.model_name,
+            'compress_after': self.compress_after,
+        }
+        if self.schedule_interval is not None:
+            kwargs['schedule_interval'] = self.schedule_interval
+        if not self.if_not_exists:
+            kwargs['if_not_exists'] = self.if_not_exists
+        if self.compress_created_before is not None:
+            kwargs['compress_created_before'] = self.compress_created_before
+        if self.initial_start is not None:
+            kwargs['initial_start'] = self.initial_start
+        if self.timezone is not None:
+            kwargs['timezone'] = self.timezone
+
+        return (
+            self.__class__.__name__,
+            [],
+            kwargs
+        )
+
+
+class RemoveCompressionPolicy(Operation):
+    """
+    Remove a compression policy from a TimescaleDB hypertable.
+    """
+
+    def __init__(self, model_name: str, if_exists: bool = True, **kwargs):
+        self.model_name = model_name
+        self.if_exists = if_exists
+        super().__init__(**kwargs)
+
+    def state_forwards(self, app_label, state):
+        """The RemoveCompressionPolicy operation doesn't alter the model state."""
+        pass
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        """Remove the compression policy from the database."""
+        from django.apps import apps
+        model = apps.get_model(app_label, self.model_name)
+        model.timescale.remove_compression_policy(if_exists=self.if_exists)
+
+    def database_backwards(self, app_label, schema_editor, from_state, to_state):
+        """This operation is not reversible without the original policy parameters."""
+        raise NotImplementedError(
+            "RemoveCompressionPolicy is not reversible. "
+            "The original policy parameters would be needed to reverse this operation."
+        )
+
+    def describe(self):
+        return f"Remove compression policy from {self.model_name}"
+
+    @property
+    def migration_name_fragment(self):
+        return f"remove_compression_policy_{self.model_name.lower()}"
+
+    def deconstruct(self):
+        kwargs = {'model_name': self.model_name}
+        if not self.if_exists:
+            kwargs['if_exists'] = self.if_exists
+
+        return (
+            self.__class__.__name__,
             [],
             kwargs
         )

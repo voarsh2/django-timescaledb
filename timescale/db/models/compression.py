@@ -123,8 +123,8 @@ class CompressionPolicy:
             cursor.execute(sql, params)
             result = cursor.fetchone()[0]
 
-        # If the result is None, the policy was removed successfully
-        return True if result is None else result
+        # TimescaleDB returns True when successful
+        return bool(result)
 
     @staticmethod
     def enable_compression(model, compress_segmentby: Optional[List[str]] = None,

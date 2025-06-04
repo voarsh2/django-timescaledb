@@ -124,5 +124,5 @@ class RetentionPolicy:
             cursor.execute(sql, params)
             result = cursor.fetchone()[0]
 
-        # If the result is None, the policy was removed successfully
-        return True if result is None else result
+        # TimescaleDB returns an empty string when successful
+        return result == ''

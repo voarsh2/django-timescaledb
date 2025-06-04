@@ -4,13 +4,39 @@ Tests for TimescaleDB migration operations.
 These tests verify that the migration operations work correctly for both
 forward and reverse migrations.
 """
+import os
+
+# Configure Django settings before importing Django modules
+import django
+from django.conf import settings
+
+if not settings.configured:
+    settings.configure(
+        DEBUG=True,
+        DATABASES={
+            'default': {
+                'ENGINE': 'timescale.db.backends.postgresql',
+                'NAME': os.environ.get('DB_DATABASE', 'test_timescale'),
+                'USER': os.environ.get('DB_USERNAME', 'postgres'),
+                'PASSWORD': os.environ.get('DB_PASSWORD', 'password'),
+                'HOST': os.environ.get('DB_HOST', 'localhost'),
+                'PORT': os.environ.get('DB_PORT', '5433'),
+            }
+        },
+        INSTALLED_APPS=[
+            'timescale',
+        ],
+        USE_TZ=True,
+        SECRET_KEY='test-secret-key-for-testing-only',
+    )
+    django.setup()
+
 from django.test import TransactionTestCase
 from django.db import connection, models, migrations
 from django.db.migrations.state import ProjectState
 from django.utils import timezone
 from datetime import timedelta
 import tempfile
-import os
 
 # Import directly to avoid circular imports
 from timescale.db.models.fields import TimescaleDateTimeField
@@ -102,9 +128,9 @@ class MigrationOperationTestCase(TransactionTestCase):
     
     def get_project_state(self):
         """Get a project state for testing."""
-        state = ProjectState()
-        state.add_model(TestMigrationModel._meta)
-        return state
+        # For our TimescaleDB operations, we don't need the model state
+        # since they work directly with the database
+        return ProjectState()
 
 
 class AddRetentionPolicyTests(MigrationOperationTestCase):
@@ -192,16 +218,16 @@ class AddRetentionPolicyTests(MigrationOperationTestCase):
             model_name='TestMigrationModel',
             drop_after='60 days',
             schedule_interval='1 day',
-            if_not_exists=True
+            if_not_exists=False  # Use non-default value to test inclusion
         )
-        
+
         name, args, kwargs = operation.deconstruct()
         self.assertEqual(name, 'AddRetentionPolicy')
         self.assertEqual(args, [])
         self.assertEqual(kwargs['model_name'], 'TestMigrationModel')
         self.assertEqual(kwargs['drop_after'], '60 days')
         self.assertEqual(kwargs['schedule_interval'], '1 day')
-        self.assertEqual(kwargs['if_not_exists'], True)
+        self.assertEqual(kwargs['if_not_exists'], False)  # Should be included when False
 
 
 class RemoveRetentionPolicyTests(MigrationOperationTestCase):
